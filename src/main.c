@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -53,6 +54,13 @@ typedef struct {
     char user_agent[512];
     size_t content_length;
 } HttpRequest;
+
+typedef struct {
+    int client_fd;
+    const char *base_dir;
+    const char *frontend_dir;
+    char client_ip[INET_ADDRSTRLEN];
+} ClientContext;
 
 static volatile sig_atomic_t keep_running = 1;
 
@@ -1654,6 +1662,18 @@ static void handle_client(int client_fd, const char *base_dir, const char *front
     free(body);
 }
 
+static void *handle_client_thread(void *arg) {
+    ClientContext *context = arg;
+    if (context == NULL) {
+        return NULL;
+    }
+
+    handle_client(context->client_fd, context->base_dir, context->frontend_dir, context->client_ip);
+    close(context->client_fd);
+    free(context);
+    return NULL;
+}
+
 static int create_server_socket(uint16_t port) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -1787,8 +1807,28 @@ int main(int argc, char *argv[]) {
             snprintf(client_ip, sizeof(client_ip), "unknown");
         }
 
-        handle_client(client_fd, base_dir, frontend_dir, client_ip);
-        close(client_fd);
+        ClientContext *context = malloc(sizeof(*context));
+        if (context == NULL) {
+            send_text_response(client_fd, 500, "Internal Server Error", "Server is busy.\n");
+            close(client_fd);
+            continue;
+        }
+
+        context->client_fd = client_fd;
+        context->base_dir = base_dir;
+        context->frontend_dir = frontend_dir;
+        snprintf(context->client_ip, sizeof(context->client_ip), "%s", client_ip);
+
+        pthread_t thread;
+        int create_result = pthread_create(&thread, NULL, handle_client_thread, context);
+        if (create_result != 0) {
+            free(context);
+            send_text_response(client_fd, 500, "Internal Server Error", "Server is busy.\n");
+            close(client_fd);
+            continue;
+        }
+
+        pthread_detach(thread);
     }
 
     close(server_fd);

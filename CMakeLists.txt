@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(file_transfer_hub C)
 
+find_package(Threads REQUIRED)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -15,3 +17,5 @@ target_compile_options(file_transfer_hub PRIVATE
     -Wextra
     -Wpedantic
 )
+
+target_link_libraries(file_transfer_hub PRIVATE Threads::Threads)
