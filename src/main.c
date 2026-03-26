@@ -964,6 +964,8 @@ static bool resolve_frontend_file(const char *frontend_dir,
         name = "app.js";
     } else if (strcmp(request_path, "/app.css") == 0) {
         name = "app.css";
+    } else if (strcmp(request_path, "/favicon.svg") == 0) {
+        name = "favicon.svg";
     } else {
         return false;
     }
@@ -972,7 +974,9 @@ static bool resolve_frontend_file(const char *frontend_dir,
 }
 
 static const char *static_cache_headers(const char *request_path) {
-    if (strcmp(request_path, "/app.js") == 0 || strcmp(request_path, "/app.css") == 0) {
+    if (strcmp(request_path, "/app.js") == 0 ||
+        strcmp(request_path, "/app.css") == 0 ||
+        strcmp(request_path, "/favicon.svg") == 0) {
         return "Cache-Control: public, max-age=86400\r\n";
     }
     if (strcmp(request_path, "/") == 0 || strcmp(request_path, "/index.html") == 0) {
@@ -1116,6 +1120,9 @@ static const char *guess_content_type(const char *filename) {
     }
     if (strcasecmp(ext, "gif") == 0) {
         return "image/gif";
+    }
+    if (strcasecmp(ext, "svg") == 0) {
+        return "image/svg+xml";
     }
     if (strcasecmp(ext, "pdf") == 0) {
         return "application/pdf";
@@ -1619,6 +1626,14 @@ static void handle_client(int client_fd, const char *base_dir, const char *front
             log_event(client_ip, "upload_success", detail);
             send_json_message(client_fd, 200, "OK", true, success_message);
         }
+    } else if (strcmp(request.method, "GET") == 0 && strcmp(request.path, "/favicon.ico") == 0) {
+        send_response(client_fd,
+                      204,
+                      "No Content",
+                      "image/x-icon",
+                      NULL,
+                      0,
+                      "Cache-Control: public, max-age=86400\r\n");
     } else if (strcmp(request.method, "GET") == 0 &&
                (strcmp(request.path, "/") == 0 || strcmp(request.path, "/index.html") == 0)) {
         send_index_page(client_fd, base_dir, frontend_dir, request.query);
