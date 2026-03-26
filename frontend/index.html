@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>文件中转站</title>
+  <link rel="preload" href="/app.css?v=20260326-3" as="style">
+  <link rel="preload" href="/app.js?v=20260326-3" as="script">
+  <link rel="stylesheet" href="/app.css?v=20260326-3">
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>文件中转站</h1>
+      <p>浏览文件、进入子目录、上传新文件并下载已有内容。</p>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>文件列表</h2>
+          <button id="back-button" class="ghost-button" type="button" hidden>返回上一级</button>
+        </div>
+        <div id="list-loading" class="list-loading">加载中...</div>
+        <div id="list-error" class="empty" hidden></div>
+        <div id="list-empty" class="empty" hidden>当前目录为空。</div>
+        <table id="file-table" hidden>
+          <thead>
+            <tr>
+              <th>
+                <button class="sort-button" type="button" data-sort-key="name" aria-label="按名称排序">
+                  名称
+                  <span class="sort-indicator" data-sort-indicator="name"></span>
+                </button>
+              </th>
+              <th>
+                <button class="sort-button" type="button" data-sort-key="type" aria-label="按类型排序">
+                  类型
+                  <span class="sort-indicator" data-sort-indicator="type"></span>
+                </button>
+              </th>
+              <th>
+                <button class="sort-button" type="button" data-sort-key="size" aria-label="按大小排序">
+                  大小
+                  <span class="sort-indicator" data-sort-indicator="size"></span>
+                </button>
+              </th>
+              <th>
+                <button class="sort-button" type="button" data-sort-key="modified_at" aria-label="按修改时间排序">
+                  修改时间
+                  <span class="sort-indicator" data-sort-indicator="modified_at"></span>
+                </button>
+              </th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="file-table-body"></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h2>上传文件</h2>
+        <form id="upload-form">
+          <input id="file-input" class="file-input" type="file" name="file" required>
+          <button type="submit">上传到当前目录</button>
+          <div id="upload-progress" class="progress" hidden>
+            <div id="upload-progress-bar" class="progress-bar"></div>
+          </div>
+          <div id="upload-status" class="upload-status">请选择文件后上传。</div>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <script id="initial-directory-data" type="application/json"></script>
+  <script src="/app.js?v=20260326-3" defer></script>
+</body>
+</html>

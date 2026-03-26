@@ -1,0 +1,15 @@
+build/
+
+file_manager.log
+file_manager-*.log
+
+*.o
+*.out
+*.exe
+
+.DS_Store
+Thumbs.db
+
+*.swp
+*.swo
+*~
