@@ -22,13 +22,19 @@ cmake --build build
 例如：
 
 ```bash
-./build/file_manager_server ./storage 8080
+./build/file_manager_server ./ 8080
 ```
 
 然后在浏览器中访问：
 
 ```text
 http://127.0.0.1:8080
+```
+
+## Docker 构建
+
+```bash
+docker build -t file-transfer-hub .
 ```
 
 ## 说明
