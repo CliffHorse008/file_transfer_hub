@@ -16,13 +16,13 @@ cmake --build build
 ## 运行
 
 ```bash
-./build/file_manager_server [目录路径] [端口]
+./build/file_transfer_hub [文件目录] [端口] [日志目录]
 ```
 
 例如：
 
 ```bash
-./build/file_manager_server ./ 8080
+./build/file_transfer_hub ./ 8080 ./logs
 ```
 
 然后在浏览器中访问：
@@ -41,6 +41,8 @@ docker build -t file-transfer-hub .
 
 - 默认监听端口是 `8080`
 - 默认展示当前工作目录
+- 默认日志写入当前工作目录，可通过第三个启动参数单独指定日志目录
+- 指定的日志目录不存在时会自动创建
 - 上传使用 `multipart/form-data`
 - 上传和下载都限制在启动时指定的目录根路径内
 - 前端静态资源默认从项目下的 `frontend/` 目录加载

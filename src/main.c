@@ -33,6 +33,8 @@
 #define MAX_BODY_SIZE (100 * 1024 * 1024)
 #define LOG_FILE_PREFIX "file_manager"
 
+static char g_log_dir[PATH_MAX] = ".";
+
 typedef struct {
     char *data;
     size_t length;
@@ -107,7 +109,13 @@ static void log_event(const char *client_ip, const char *event, const char *deta
                  tm_value.tm_mday);
     }
 
-    FILE *log_file = fopen(log_filename, "a");
+    char log_path[PATH_MAX];
+    int path_written = snprintf(log_path, sizeof(log_path), "%s/%s", g_log_dir, log_filename);
+    if (path_written < 0 || (size_t)path_written >= sizeof(log_path)) {
+        return;
+    }
+
+    FILE *log_file = fopen(log_path, "a");
     if (log_file == NULL) {
         return;
     }
@@ -1713,6 +1721,53 @@ static bool ensure_directory_exists(const char *path) {
     return S_ISDIR(st.st_mode);
 }
 
+static bool create_directory_if_missing(const char *path) {
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+
+    if (errno != ENOENT) {
+        return false;
+    }
+
+    if (mkdir(path, 0755) != 0 && errno != EEXIST) {
+        return false;
+    }
+
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool ensure_directory_tree(const char *path) {
+    char buffer[PATH_MAX];
+    size_t length = strlen(path);
+    if (length == 0 || length >= sizeof(buffer)) {
+        return false;
+    }
+
+    memcpy(buffer, path, length + 1);
+    while (length > 1 && buffer[length - 1] == '/') {
+        buffer[--length] = '\0';
+    }
+
+    if (strcmp(buffer, "/") == 0) {
+        return true;
+    }
+
+    for (char *cursor = buffer + 1; *cursor != '\0'; ++cursor) {
+        if (*cursor != '/') {
+            continue;
+        }
+        *cursor = '\0';
+        if (!create_directory_if_missing(buffer)) {
+            return false;
+        }
+        *cursor = '/';
+    }
+
+    return create_directory_if_missing(buffer);
+}
+
 static bool trim_last_path_component(char *path) {
     char *slash = strrchr(path, '/');
     if (slash == NULL) {
@@ -1746,9 +1801,56 @@ static bool resolve_frontend_dir(const char *argv0, char *frontend_dir, size_t d
     return false;
 }
 
+static bool resolve_log_dir(const char *directory, char *log_dir, size_t log_dir_size) {
+    if (directory == NULL || directory[0] == '\0' || log_dir_size == 0) {
+        return false;
+    }
+
+    if (realpath(directory, log_dir) != NULL) {
+        return ensure_directory_exists(log_dir);
+    }
+
+    if (errno != ENOENT) {
+        return false;
+    }
+
+    char candidate[PATH_MAX];
+    if (directory[0] == '/') {
+        int written = snprintf(candidate, sizeof(candidate), "%s", directory);
+        if (written < 0 || (size_t)written >= sizeof(candidate)) {
+            return false;
+        }
+    } else {
+        char current_dir[PATH_MAX];
+        if (realpath(".", current_dir) == NULL) {
+            return false;
+        }
+        int written = snprintf(candidate, sizeof(candidate), "%s/%s", current_dir, directory);
+        if (written < 0 || (size_t)written >= sizeof(candidate)) {
+            return false;
+        }
+    }
+
+    if (!ensure_directory_tree(candidate)) {
+        return false;
+    }
+
+    if (realpath(candidate, log_dir) == NULL) {
+        return false;
+    }
+
+    return ensure_directory_exists(log_dir);
+}
+
 int main(int argc, char *argv[]) {
     uint16_t port = 8080;
     const char *directory = ".";
+    const char *log_directory = ".";
+
+    if (argc > 4) {
+        fprintf(stderr, "Usage: %s [directory] [port] [log_directory]\n", argv[0]);
+        return 1;
+    }
 
     if (argc >= 2) {
         directory = argv[1];
@@ -1760,6 +1862,9 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         port = (uint16_t)parsed;
+    }
+    if (argc >= 4) {
+        log_directory = argv[3];
     }
 
     char base_dir[PATH_MAX];
@@ -1778,6 +1883,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    if (!resolve_log_dir(log_directory, g_log_dir, sizeof(g_log_dir))) {
+        fprintf(stderr, "Log directory is unavailable: %s\n", log_directory);
+        return 1;
+    }
+
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
     signal(SIGPIPE, SIG_IGN);
@@ -1789,6 +1899,8 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Open http://127.0.0.1:%u\n", port);
+    printf("Files: %s\n", base_dir);
+    printf("Logs: %s\n", g_log_dir);
 
     while (keep_running) {
         struct sockaddr_in client_addr;
