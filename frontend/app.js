@@ -1,4 +1,7 @@
 (function () {
+  const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
+  const DEFAULT_UPLOAD_STATUS = "请选择文件后上传";
+
   const state = {
     currentPath: "",
     cache: new Map(),
@@ -18,6 +21,7 @@
     sortButtons: Array.from(document.querySelectorAll(".sort-button")),
     uploadForm: document.getElementById("upload-form"),
     fileInput: document.getElementById("file-input"),
+    uploadButton: document.querySelector("#upload-form button[type='submit']"),
     uploadProgress: document.getElementById("upload-progress"),
     uploadProgressBar: document.getElementById("upload-progress-bar"),
     uploadStatus: document.getElementById("upload-status")
@@ -48,6 +52,18 @@
     }
     const query = params.toString();
     return query ? `/api/list?${query}` : "/api/list";
+  }
+
+  function buildChunkUploadUrl(path, fileName, uploadId, chunkIndex, totalChunks) {
+    const params = new URLSearchParams();
+    if (path) {
+      params.set("path", path);
+    }
+    params.set("file", fileName);
+    params.set("upload_id", uploadId);
+    params.set("chunk_index", String(chunkIndex));
+    params.set("total_chunks", String(totalChunks));
+    return `/api/upload/chunk?${params.toString()}`;
   }
 
   function getPathFromLocation() {
@@ -277,69 +293,144 @@
     elements.uploadProgressBar.style.width = "0%";
   }
 
-  function uploadCurrentFile(event) {
-    event.preventDefault();
+  function formatFileSize(size) {
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = Number(size || 0);
+    let unitIndex = 0;
 
+    while (value >= 1024 && unitIndex + 1 < units.length) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+
+    return `${value.toFixed(unitIndex === 0 ? 0 : 2)} ${units[unitIndex]}`;
+  }
+
+  function updateSelectedFileStatus() {
     if (!elements.fileInput.files || elements.fileInput.files.length === 0) {
-      elements.uploadStatus.textContent = "请选择要上传的文件。";
+      elements.uploadStatus.textContent = DEFAULT_UPLOAD_STATUS;
       return;
     }
 
-    const formData = new FormData();
-    formData.append("file", elements.fileInput.files[0]);
-
-    const xhr = new XMLHttpRequest();
-    const query = state.currentPath ? `?path=${encodeURIComponent(state.currentPath)}` : "";
-
-    xhr.open("POST", `/api/upload${query}`, true);
-    elements.uploadProgress.hidden = false;
-    elements.uploadProgressBar.style.width = "0%";
-    elements.uploadStatus.textContent = "开始上传...";
-
-    xhr.upload.onprogress = function (progressEvent) {
-      if (!progressEvent.lengthComputable) {
-        elements.uploadStatus.textContent = "正在上传...";
-        return;
-      }
-      const percent = Math.min(100, Math.round(progressEvent.loaded / progressEvent.total * 100));
-      elements.uploadProgressBar.style.width = `${percent}%`;
-      elements.uploadStatus.textContent = `上传中 ${percent}%`;
-    };
-
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) {
-        return;
-      }
-
-      let data = null;
-      try {
-        data = JSON.parse(xhr.responseText);
-      } catch (error) {
-        data = null;
-      }
-
-      if (xhr.status >= 200 && xhr.status < 300 && data && data.ok) {
-        elements.uploadProgressBar.style.width = "100%";
-        elements.uploadStatus.textContent = data.message || "上传成功";
-        state.cache.delete(state.currentPath);
-        elements.fileInput.value = "";
-        window.setTimeout(function () {
-          loadDirectory(state.currentPath, { force: true });
-        }, 250);
-      } else {
-        resetUploadProgress();
-        elements.uploadStatus.textContent = data && data.message ? data.message : "上传失败";
-      }
-    };
-
-    xhr.onerror = function () {
-      resetUploadProgress();
-      elements.uploadStatus.textContent = "上传失败，网络连接异常。";
-    };
-
-    xhr.send(formData);
+    const file = elements.fileInput.files[0];
+    const totalChunks = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK_SIZE));
+    const sizeText = formatFileSize(file.size);
+    elements.uploadStatus.textContent = totalChunks > 1
+      ? `已选择 ${file.name} (${sizeText})`
+      : `已选择 ${file.name} (${sizeText})`;
   }
 
+  function setUploadBusy(busy) {
+    elements.fileInput.disabled = busy;
+    if (elements.uploadButton) {
+      elements.uploadButton.disabled = busy;
+    }
+  }
+
+  function createUploadId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID().replaceAll("-", "");
+    }
+    return `${Date.now()}${Math.random().toString(16).slice(2)}`;
+  }
+
+  function parseJsonResponse(xhr) {
+    try {
+      return JSON.parse(xhr.responseText);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function uploadChunk(file, start, end, url, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url, true);
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+      xhr.upload.onprogress = function (progressEvent) {
+        if (typeof onProgress === "function") {
+          onProgress(progressEvent);
+        }
+      };
+
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) {
+          return;
+        }
+
+        const data = parseJsonResponse(xhr);
+        if (xhr.status >= 200 && xhr.status < 300 && data && data.ok) {
+          resolve(data);
+          return;
+        }
+
+        reject(new Error((data && data.message) || "上传失败"));
+      };
+
+      xhr.onerror = function () {
+        reject(new Error("上传失败，网络连接异常。"));
+      };
+
+      xhr.send(file.slice(start, end));
+    });
+  }
+
+  async function uploadCurrentFile(event) {
+    event.preventDefault();
+
+    if (!elements.fileInput.files || elements.fileInput.files.length === 0) {
+      elements.uploadStatus.textContent = DEFAULT_UPLOAD_STATUS;
+      return;
+    }
+
+    const file = elements.fileInput.files[0];
+    const totalBytes = file.size;
+    const totalChunks = Math.max(1, Math.ceil(totalBytes / UPLOAD_CHUNK_SIZE));
+    const uploadId = createUploadId();
+
+    setUploadBusy(true);
+    elements.uploadProgress.hidden = false;
+    elements.uploadProgressBar.style.width = "0%";
+    elements.uploadStatus.textContent = totalChunks > 1
+      ? "开始上传，文件较大时会稍久一些..."
+      : "开始上传...";
+
+    let responseData = null;
+
+    try {
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+        const start = chunkIndex * UPLOAD_CHUNK_SIZE;
+        const end = Math.min(totalBytes, start + UPLOAD_CHUNK_SIZE);
+        const url = buildChunkUploadUrl(state.currentPath, file.name, uploadId, chunkIndex, totalChunks);
+
+        responseData = await uploadChunk(file, start, end, url, function (progressEvent) {
+          const uploadedBytes = start + progressEvent.loaded;
+          const percentBase = totalBytes > 0 ? uploadedBytes / totalBytes : 1;
+          const percent = Math.min(100, Math.round(percentBase * 100));
+          elements.uploadProgressBar.style.width = `${percent}%`;
+          elements.uploadStatus.textContent = totalChunks > 1
+            ? `正在上传 ${percent}%，文件较大，请稍候。`
+            : `正在上传 ${percent}%`;
+        });
+      }
+
+      elements.uploadProgressBar.style.width = "100%";
+      elements.uploadStatus.textContent = (responseData && responseData.message) || "上传成功";
+      state.cache.delete(state.currentPath);
+      elements.fileInput.value = "";
+      window.setTimeout(function () {
+        loadDirectory(state.currentPath, { force: true });
+      }, 250);
+    } catch (error) {
+      resetUploadProgress();
+      elements.uploadStatus.textContent = error && error.message ? error.message : "上传失败";
+    } finally {
+      setUploadBusy(false);
+    }
+  }
+
+  elements.fileInput.addEventListener("change", updateSelectedFileStatus);
   document.addEventListener("click", function (event) {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {

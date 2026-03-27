@@ -31,7 +31,7 @@
 #define READ_BUFFER_SIZE 8192
 #define MAX_HEADER_SIZE (64 * 1024)
 #define MAX_BODY_SIZE (100 * 1024 * 1024)
-#define LOG_FILE_PREFIX "file_manager"
+#define LOG_FILE_PREFIX "file_hub"
 
 static char g_log_dir[PATH_MAX] = ".";
 
@@ -377,6 +377,25 @@ static bool is_safe_filename(const char *name) {
         return false;
     }
     return strstr(name, "..") == NULL;
+}
+
+static bool is_safe_upload_id(const char *upload_id) {
+    if (upload_id == NULL || upload_id[0] == '\0') {
+        return false;
+    }
+
+    size_t length = 0;
+    for (const unsigned char *cursor = (const unsigned char *)upload_id; *cursor != '\0'; ++cursor) {
+        if (!isalnum(*cursor) && *cursor != '-' && *cursor != '_') {
+            return false;
+        }
+        ++length;
+        if (length > 128) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static void sanitize_uploaded_filename(char *name) {
@@ -1155,6 +1174,7 @@ static bool write_file_bytes(const char *path, const char *data, size_t length) 
         return false;
     }
 
+    bool ok = true;
     size_t written_total = 0;
     while (written_total < length) {
         ssize_t written = write(fd, data + written_total, length - written_total);
@@ -1162,13 +1182,111 @@ static bool write_file_bytes(const char *path, const char *data, size_t length) 
             if (errno == EINTR) {
                 continue;
             }
-            close(fd);
-            return false;
+            ok = false;
+            break;
         }
         written_total += (size_t)written;
     }
 
     close(fd);
+    return ok;
+}
+
+static bool parse_size_t_value(const char *input, size_t *value_out) {
+    if (input == NULL || input[0] == '\0' || value_out == NULL) {
+        return false;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(input, &end, 10);
+    if (errno != 0 || end == input || *end != '\0') {
+        return false;
+    }
+
+    *value_out = (size_t)value;
+    return true;
+}
+
+static bool parse_size_t_query_param(const char *query, const char *key, size_t *value_out) {
+    char raw[64];
+    if (!find_query_param(query, key, raw, sizeof(raw))) {
+        return false;
+    }
+    return parse_size_t_value(raw, value_out);
+}
+
+static bool prepare_chunk_upload(const char *target_dir,
+                                 const char *filename,
+                                 const char *upload_id,
+                                 size_t chunk_index,
+                                 size_t total_chunks,
+                                 char *temp_path,
+                                 size_t temp_path_size,
+                                 char *final_path,
+                                 size_t final_path_size,
+                                 char *error_message,
+                                 size_t error_size) {
+    if (!is_safe_filename(filename)) {
+        snprintf(error_message, error_size, "上传文件名不安全。");
+        return false;
+    }
+    if (!is_safe_upload_id(upload_id)) {
+        snprintf(error_message, error_size, "上传会话无效。");
+        return false;
+    }
+    if (total_chunks == 0 || chunk_index >= total_chunks) {
+        snprintf(error_message, error_size, "分片参数无效。");
+        return false;
+    }
+
+    char temp_name[NAME_MAX];
+    int temp_name_written = snprintf(temp_name, sizeof(temp_name), ".upload-%s.part", upload_id);
+    if (temp_name_written < 0 || (size_t)temp_name_written >= sizeof(temp_name)) {
+        snprintf(error_message, error_size, "上传会话标识过长。");
+        return false;
+    }
+
+    if (!join_path(temp_path, temp_path_size, target_dir, temp_name) ||
+        !join_path(final_path, final_path_size, target_dir, filename)) {
+        snprintf(error_message, error_size, "目标路径过长。");
+        return false;
+    }
+
+    if (chunk_index > 0) {
+        struct stat st;
+        if (stat(temp_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            snprintf(error_message, error_size, "上传会话不存在或已过期，请重新上传。");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool complete_chunk_upload(const char *temp_path,
+                                  const char *final_path,
+                                  size_t chunk_index,
+                                  size_t total_chunks,
+                                  bool *is_complete,
+                                  char *error_message,
+                                  size_t error_size) {
+    if (is_complete != NULL) {
+        *is_complete = false;
+    }
+
+    if (chunk_index + 1 != total_chunks) {
+        return true;
+    }
+
+    if (rename(temp_path, final_path) != 0) {
+        snprintf(error_message, error_size, "文件保存失败: %s", strerror(errno));
+        return false;
+    }
+
+    if (is_complete != NULL) {
+        *is_complete = true;
+    }
     return true;
 }
 
@@ -1339,10 +1457,13 @@ static bool find_query_param(const char *query, const char *key, char *value, si
     return false;
 }
 
-static bool read_http_request(int client_fd, HttpRequest *request, char **body_out, size_t *body_length_out) {
+static bool read_http_request_headers(int client_fd,
+                                      HttpRequest *request,
+                                      char **buffered_body_out,
+                                      size_t *buffered_body_length_out) {
     memset(request, 0, sizeof(*request));
-    *body_out = NULL;
-    *body_length_out = 0;
+    *buffered_body_out = NULL;
+    *buffered_body_length_out = 0;
 
     size_t buffer_size = READ_BUFFER_SIZE;
     char *buffer = malloc(buffer_size);
@@ -1452,48 +1573,130 @@ headers_complete:
         header_line = next_line + 2;
     }
 
-    if (request->content_length > MAX_BODY_SIZE) {
-        free(buffer);
-        return false;
+    size_t buffered_body = total_read - header_end_offset;
+    if (buffered_body > request->content_length) {
+        buffered_body = request->content_length;
     }
-
-    if (request->content_length > 0) {
-        char *body = malloc(request->content_length);
-        if (body == NULL) {
+    if (buffered_body > 0) {
+        char *buffered_body_copy = malloc(buffered_body);
+        if (buffered_body_copy == NULL) {
             free(buffer);
             return false;
         }
-
-        size_t buffered_body = total_read - header_end_offset;
-        if (buffered_body > request->content_length) {
-            buffered_body = request->content_length;
-        }
-        memcpy(body, buffer + header_end_offset, buffered_body);
-
-        size_t body_read = buffered_body;
-        while (body_read < request->content_length) {
-            ssize_t received = recv(client_fd, body + body_read, request->content_length - body_read, 0);
-            if (received < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                free(body);
-                free(buffer);
-                return false;
-            }
-            if (received == 0) {
-                free(body);
-                free(buffer);
-                return false;
-            }
-            body_read += (size_t)received;
-        }
-
-        *body_out = body;
-        *body_length_out = request->content_length;
+        memcpy(buffered_body_copy, buffer + header_end_offset, buffered_body);
+        *buffered_body_out = buffered_body_copy;
+        *buffered_body_length_out = buffered_body;
     }
 
     free(buffer);
+    return true;
+}
+
+static bool read_http_request_body(int client_fd,
+                                   size_t content_length,
+                                   const char *buffered_body,
+                                   size_t buffered_body_length,
+                                   char **body_out,
+                                   size_t *body_length_out) {
+    *body_out = NULL;
+    *body_length_out = 0;
+
+    if (content_length > MAX_BODY_SIZE) {
+        return false;
+    }
+    if (content_length == 0) {
+        return true;
+    }
+
+    char *body = malloc(content_length);
+    if (body == NULL) {
+        return false;
+    }
+
+    size_t copied = buffered_body_length;
+    if (copied > content_length) {
+        copied = content_length;
+    }
+    if (copied > 0 && buffered_body != NULL) {
+        memcpy(body, buffered_body, copied);
+    }
+
+    size_t body_read = copied;
+    while (body_read < content_length) {
+        ssize_t received = recv(client_fd, body + body_read, content_length - body_read, 0);
+        if (received < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            free(body);
+            return false;
+        }
+        if (received == 0) {
+            errno = ECONNRESET;
+            free(body);
+            return false;
+        }
+        body_read += (size_t)received;
+    }
+
+    *body_out = body;
+    *body_length_out = content_length;
+    return true;
+}
+
+static bool stream_http_request_body(int client_fd,
+                                     int output_fd,
+                                     size_t content_length,
+                                     const char *buffered_body,
+                                     size_t buffered_body_length) {
+    size_t written_total = 0;
+    size_t copied = buffered_body_length;
+    if (copied > content_length) {
+        copied = content_length;
+    }
+
+    while (written_total < copied) {
+        ssize_t written = write(output_fd, buffered_body + written_total, copied - written_total);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        written_total += (size_t)written;
+    }
+
+    char buffer[READ_BUFFER_SIZE];
+    while (written_total < content_length) {
+        size_t remaining = content_length - written_total;
+        size_t to_read = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        ssize_t received = recv(client_fd, buffer, to_read, 0);
+        if (received < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (received == 0) {
+            errno = ECONNRESET;
+            return false;
+        }
+
+        size_t offset = 0;
+        while (offset < (size_t)received) {
+            ssize_t written = write(output_fd, buffer + offset, (size_t)received - offset);
+            if (written < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return false;
+            }
+            offset += (size_t)written;
+        }
+
+        written_total += (size_t)received;
+    }
+
     return true;
 }
 
@@ -1568,12 +1771,15 @@ static bool send_file_download(int client_fd, const char *base_dir, const char *
 
 static void handle_client(int client_fd, const char *base_dir, const char *frontend_dir, const char *client_ip) {
     HttpRequest request;
+    char *buffered_body = NULL;
+    size_t buffered_body_length = 0;
     char *body = NULL;
     size_t body_length = 0;
 
-    if (!read_http_request(client_fd, &request, &body, &body_length)) {
+    if (!read_http_request_headers(client_fd, &request, &buffered_body, &buffered_body_length)) {
         log_event(client_ip, "request_failed", "malformed http request");
         send_text_response(client_fd, 400, "Bad Request", "Malformed HTTP request.\n");
+        free(buffered_body);
         free(body);
         return;
     }
@@ -1592,15 +1798,14 @@ static void handle_client(int client_fd, const char *base_dir, const char *front
         send_directory_listing_json(client_fd, base_dir, request.query);
     } else if (strcmp(request.method, "GET") == 0 && strcmp(request.path, "/api/download") == 0) {
         send_file_download(client_fd, base_dir, request.query, client_ip);
-    } else if (strcmp(request.method, "POST") == 0 && strcmp(request.path, "/api/upload") == 0) {
+    } else if (strcmp(request.method, "POST") == 0 && strcmp(request.path, "/api/upload/chunk") == 0) {
         char relative_path[PATH_MAX];
         char decoded_path[PATH_MAX];
         if (find_query_param(request.query, "path", decoded_path, sizeof(decoded_path))) {
             if (!normalize_relative_path(decoded_path, relative_path, sizeof(relative_path))) {
                 log_event(client_ip, "upload_failed", "invalid path parameter");
                 send_json_message(client_fd, 400, "Bad Request", false, "目录参数无效。");
-                free(body);
-                return;
+                goto cleanup;
             }
         } else {
             relative_path[0] = '\0';
@@ -1610,13 +1815,177 @@ static void handle_client(int client_fd, const char *base_dir, const char *front
         if (!resolve_directory_path(base_dir, relative_path, target_dir, sizeof(target_dir))) {
             log_event(client_ip, "upload_failed", "target directory not found");
             send_json_message(client_fd, 404, "Not Found", false, "目标目录不存在。");
-            free(body);
-            return;
+            goto cleanup;
+        }
+
+        char filename[NAME_MAX];
+        if (!find_query_param(request.query, "file", filename, sizeof(filename))) {
+            log_event(client_ip, "upload_failed", "missing file parameter");
+            send_json_message(client_fd, 400, "Bad Request", false, "缺少文件名。");
+            goto cleanup;
+        }
+        sanitize_uploaded_filename(filename);
+        if (!is_safe_filename(filename)) {
+            log_event(client_ip, "upload_failed", "invalid file parameter");
+            send_json_message(client_fd, 400, "Bad Request", false, "文件名无效。");
+            goto cleanup;
+        }
+
+        char upload_id[160];
+        if (!find_query_param(request.query, "upload_id", upload_id, sizeof(upload_id)) ||
+            !is_safe_upload_id(upload_id)) {
+            log_event(client_ip, "upload_failed", "invalid upload_id parameter");
+            send_json_message(client_fd, 400, "Bad Request", false, "上传会话无效。");
+            goto cleanup;
+        }
+
+        size_t chunk_index = 0;
+        size_t total_chunks = 0;
+        if (!parse_size_t_query_param(request.query, "chunk_index", &chunk_index) ||
+            !parse_size_t_query_param(request.query, "total_chunks", &total_chunks)) {
+            log_event(client_ip, "upload_failed", "invalid chunk parameters");
+            send_json_message(client_fd, 400, "Bad Request", false, "分片参数无效。");
+            goto cleanup;
+        }
+
+        bool is_complete = false;
+        char error_message[256];
+        error_message[0] = '\0';
+        char temp_path[PATH_MAX];
+        char final_path[PATH_MAX];
+        if (!prepare_chunk_upload(target_dir,
+                                  filename,
+                                  upload_id,
+                                  chunk_index,
+                                  total_chunks,
+                                  temp_path,
+                                  sizeof(temp_path),
+                                  final_path,
+                                  sizeof(final_path),
+                                  error_message,
+                                  sizeof(error_message))) {
+            char detail[768];
+            snprintf(detail,
+                     sizeof(detail),
+                     "file=%.200s path=%.200s chunk=%zu/%zu reason=%.200s",
+                     filename,
+                     relative_path,
+                     chunk_index + 1,
+                     total_chunks,
+                     error_message);
+            log_event(client_ip, "upload_failed", detail);
+            send_json_message(client_fd, 400, "Bad Request", false, error_message);
+            goto cleanup;
+        }
+
+        int flags = O_WRONLY | O_CREAT;
+        flags |= chunk_index == 0 ? O_TRUNC : O_APPEND;
+        int chunk_fd = open(temp_path, flags, 0644);
+        off_t rollback_size = 0;
+        if (chunk_fd < 0) {
+            snprintf(error_message, sizeof(error_message), "分片写入失败: %s", strerror(errno));
+        } else if (chunk_index > 0) {
+            rollback_size = lseek(chunk_fd, 0, SEEK_END);
+            if (rollback_size < 0) {
+                snprintf(error_message, sizeof(error_message), "分片写入失败: %s", strerror(errno));
+            }
+        }
+
+        if (chunk_fd >= 0 && error_message[0] == '\0' &&
+            !stream_http_request_body(client_fd,
+                                      chunk_fd,
+                                      request.content_length,
+                                      buffered_body,
+                                      buffered_body_length)) {
+            int write_errno = errno;
+            if (ftruncate(chunk_fd, rollback_size) != 0) {
+                snprintf(error_message, sizeof(error_message), "分片回滚失败: %s", strerror(errno));
+            } else {
+                snprintf(error_message, sizeof(error_message), "分片写入失败: %s", strerror(write_errno));
+            }
+        }
+
+        if (chunk_fd >= 0) {
+            if (close(chunk_fd) != 0) {
+                snprintf(error_message, sizeof(error_message), "分片写入失败: %s", strerror(errno));
+                chunk_fd = -1;
+            } else if (error_message[0] != '\0' ||
+                       !complete_chunk_upload(temp_path,
+                                              final_path,
+                                              chunk_index,
+                                              total_chunks,
+                                              &is_complete,
+                                              error_message,
+                                              sizeof(error_message))) {
+                chunk_fd = -1;
+            }
+        }
+
+        if (chunk_fd < 0 || error_message[0] != '\0') {
+            char detail[768];
+            snprintf(detail,
+                     sizeof(detail),
+                     "file=%.200s path=%.200s chunk=%zu/%zu reason=%.200s",
+                     filename,
+                     relative_path,
+                     chunk_index + 1,
+                     total_chunks,
+                     error_message);
+            log_event(client_ip, "upload_failed", detail);
+            send_json_message(client_fd, 400, "Bad Request", false, error_message);
+        } else if (is_complete) {
+            char success_message[256];
+            char detail[512];
+            snprintf(success_message, sizeof(success_message), "上传成功: %.200s", filename);
+            snprintf(detail,
+                     sizeof(detail),
+                     "file=%.200s path=%.200s chunks=%zu request_bytes=%zu",
+                     filename,
+                     relative_path,
+                     total_chunks,
+                     request.content_length);
+            log_event(client_ip, "upload_success", detail);
+            send_json_message(client_fd, 200, "OK", true, success_message);
+        } else {
+            char progress_message[256];
+            snprintf(progress_message,
+                     sizeof(progress_message),
+                     "已接收分片 %zu/%zu",
+                     chunk_index + 1,
+                     total_chunks);
+            send_json_message(client_fd, 200, "OK", true, progress_message);
+        }
+    } else if (strcmp(request.method, "POST") == 0 && strcmp(request.path, "/api/upload") == 0) {
+        char relative_path[PATH_MAX];
+        char decoded_path[PATH_MAX];
+        if (find_query_param(request.query, "path", decoded_path, sizeof(decoded_path))) {
+            if (!normalize_relative_path(decoded_path, relative_path, sizeof(relative_path))) {
+                log_event(client_ip, "upload_failed", "invalid path parameter");
+                send_json_message(client_fd, 400, "Bad Request", false, "目录参数无效。");
+                goto cleanup;
+            }
+        } else {
+            relative_path[0] = '\0';
+        }
+
+        char target_dir[PATH_MAX];
+        if (!resolve_directory_path(base_dir, relative_path, target_dir, sizeof(target_dir))) {
+            log_event(client_ip, "upload_failed", "target directory not found");
+            send_json_message(client_fd, 404, "Not Found", false, "目标目录不存在。");
+            goto cleanup;
         }
 
         char error_message[256];
         char saved_filename[NAME_MAX];
-        if (request.content_length == 0 || body == NULL) {
+        if (!read_http_request_body(client_fd,
+                                    request.content_length,
+                                    buffered_body,
+                                    buffered_body_length,
+                                    &body,
+                                    &body_length)) {
+            log_event(client_ip, "upload_failed", "request body too large or truncated");
+            send_json_message(client_fd, 413, "Payload Too Large", false, "文件太大，请在网页中重新选择文件后上传。");
+        } else if (request.content_length == 0 || body == NULL) {
             log_event(client_ip, "upload_failed", "empty upload body");
             send_json_message(client_fd, 400, "Bad Request", false, "上传内容为空。");
         } else if (strstr(request.content_type, "multipart/form-data") == NULL) {
@@ -1667,6 +2036,8 @@ static void handle_client(int client_fd, const char *base_dir, const char *front
         send_text_response(client_fd, 404, "Not Found", "Route not found.\n");
     }
 
+cleanup:
+    free(buffered_body);
     free(body);
 }
 

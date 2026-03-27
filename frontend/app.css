@@ -124,6 +124,20 @@ form {
   background: #fff;
 }
 
+.upload-tip {
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 0.94rem;
+  line-height: 1.6;
+  color: #7b583a;
+  background: #fff4e3;
+  border: 1px solid #ecd9c1;
+}
+
+.upload-tip code {
+  font-size: 0.92em;
+}
+
 .progress {
   width: 100%;
   height: 12px;
