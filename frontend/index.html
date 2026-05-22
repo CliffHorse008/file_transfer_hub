@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>文件中转站</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="preload" href="/app.css?v=20260326-3" as="style">
-  <link rel="preload" href="/app.js?v=20260326-3" as="script">
-  <link rel="stylesheet" href="/app.css?v=20260326-3">
+  <link rel="preload" href="/app.css?v=20260522-1" as="style">
+  <link rel="preload" href="/app.js?v=20260522-1" as="script">
+  <link rel="stylesheet" href="/app.css?v=20260522-1">
 </head>
 <body>
   <div class="wrap">
@@ -59,21 +59,41 @@
         </table>
       </div>
 
-      <div class="panel">
-        <h2>上传文件</h2>
-        <form id="upload-form">
-          <input id="file-input" class="file-input" type="file" name="file" required>
-          <button type="submit">上传到当前目录</button>
-          <div id="upload-progress" class="progress" hidden>
-            <div id="upload-progress-bar" class="progress-bar"></div>
+      <div class="stack">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>文本剪贴板</h2>
+            <div class="panel-actions">
+              <button id="clipboard-refresh-button" class="ghost-button" type="button">刷新</button>
+              <button id="clipboard-clear-button" class="ghost-button" type="button">清空</button>
+            </div>
           </div>
-          <div id="upload-status" class="upload-status">请选择文件后上传</div>
-        </form>
+          <form id="clipboard-form" class="clipboard-form">
+            <textarea id="clipboard-input" class="clipboard-input" rows="10" placeholder="输入临时保存的字符串"></textarea>
+            <div class="panel-actions">
+              <button id="clipboard-save-button" type="submit">保存剪贴板</button>
+              <button id="clipboard-copy-button" class="ghost-button" type="button">复制到本机</button>
+            </div>
+            <div id="clipboard-status" class="upload-status">暂无剪贴板内容。</div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>上传文件</h2>
+          <form id="upload-form">
+            <input id="file-input" class="file-input" type="file" name="file" required>
+            <button type="submit">上传到当前目录</button>
+            <div id="upload-progress" class="progress" hidden>
+              <div id="upload-progress-bar" class="progress-bar"></div>
+            </div>
+            <div id="upload-status" class="upload-status">请选择文件后上传</div>
+          </form>
+        </div>
       </div>
     </section>
   </div>
 
   <script id="initial-directory-data" type="application/json"></script>
-  <script src="/app.js?v=20260327-1" defer></script>
+  <script src="/app.js?v=20260522-1" defer></script>
 </body>
 </html>

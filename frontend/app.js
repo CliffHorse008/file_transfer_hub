@@ -1,6 +1,7 @@
 (function () {
   const UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
   const DEFAULT_UPLOAD_STATUS = "请选择文件后上传";
+  const DEFAULT_CLIPBOARD_STATUS = "暂无剪贴板内容。";
 
   const state = {
     currentPath: "",
@@ -24,7 +25,14 @@
     uploadButton: document.querySelector("#upload-form button[type='submit']"),
     uploadProgress: document.getElementById("upload-progress"),
     uploadProgressBar: document.getElementById("upload-progress-bar"),
-    uploadStatus: document.getElementById("upload-status")
+    uploadStatus: document.getElementById("upload-status"),
+    clipboardForm: document.getElementById("clipboard-form"),
+    clipboardInput: document.getElementById("clipboard-input"),
+    clipboardStatus: document.getElementById("clipboard-status"),
+    clipboardSaveButton: document.getElementById("clipboard-save-button"),
+    clipboardRefreshButton: document.getElementById("clipboard-refresh-button"),
+    clipboardClearButton: document.getElementById("clipboard-clear-button"),
+    clipboardCopyButton: document.getElementById("clipboard-copy-button")
   };
 
   function escapeHtml(value) {
@@ -66,6 +74,10 @@
     return `/api/upload/chunk?${params.toString()}`;
   }
 
+  function buildClipboardUrl() {
+    return "/api/clipboard";
+  }
+
   function getPathFromLocation() {
     return new URLSearchParams(window.location.search).get("path") || "";
   }
@@ -100,6 +112,103 @@
     elements.error.hidden = false;
     elements.empty.hidden = true;
     elements.table.hidden = true;
+  }
+
+  function setClipboardStatus(message) {
+    elements.clipboardStatus.textContent = message || DEFAULT_CLIPBOARD_STATUS;
+  }
+
+  function setClipboardBusy(busy) {
+    elements.clipboardInput.disabled = busy;
+    if (elements.clipboardSaveButton) {
+      elements.clipboardSaveButton.disabled = busy;
+    }
+    if (elements.clipboardRefreshButton) {
+      elements.clipboardRefreshButton.disabled = busy;
+    }
+    if (elements.clipboardClearButton) {
+      elements.clipboardClearButton.disabled = busy;
+    }
+    if (elements.clipboardCopyButton) {
+      elements.clipboardCopyButton.disabled = busy;
+    }
+  }
+
+  async function loadClipboard() {
+    try {
+      const response = await fetch(buildClipboardUrl(), {
+        headers: {
+          "X-Requested-With": "fetch"
+        }
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error((data && data.message) || "剪贴板加载失败");
+      }
+
+      elements.clipboardInput.value = data.text || "";
+      setClipboardStatus(data.text ? `已保存 ${Number(data.length || 0)} 字符。` : DEFAULT_CLIPBOARD_STATUS);
+    } catch (error) {
+      setClipboardStatus(error.message || "剪贴板加载失败");
+    }
+  }
+
+  async function saveClipboard() {
+    setClipboardBusy(true);
+    try {
+      const response = await fetch(buildClipboardUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "X-Requested-With": "fetch"
+        },
+        body: elements.clipboardInput.value || ""
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error((data && data.message) || "剪贴板保存失败");
+      }
+
+      elements.clipboardInput.value = data.text || "";
+      setClipboardStatus(data.text ? `已保存 ${Number(data.length || 0)} 字符。` : DEFAULT_CLIPBOARD_STATUS);
+    } catch (error) {
+      setClipboardStatus(error.message || "剪贴板保存失败");
+    } finally {
+      setClipboardBusy(false);
+    }
+  }
+
+  async function clearClipboard() {
+    setClipboardBusy(true);
+    try {
+      const response = await fetch(buildClipboardUrl(), {
+        method: "DELETE",
+        headers: {
+          "X-Requested-With": "fetch"
+        }
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error((data && data.message) || "剪贴板清空失败");
+      }
+
+      elements.clipboardInput.value = "";
+      setClipboardStatus(DEFAULT_CLIPBOARD_STATUS);
+    } catch (error) {
+      setClipboardStatus(error.message || "剪贴板清空失败");
+    } finally {
+      setClipboardBusy(false);
+    }
+  }
+
+  async function copyClipboardToLocal() {
+    const text = elements.clipboardInput.value || "";
+    try {
+      await navigator.clipboard.writeText(text);
+      setClipboardStatus(text ? "已复制到本机剪贴板。" : DEFAULT_CLIPBOARD_STATUS);
+    } catch (error) {
+      setClipboardStatus("复制失败，请手动选择文本。");
+    }
   }
 
   function clearError() {
@@ -431,6 +540,25 @@
   }
 
   elements.fileInput.addEventListener("change", updateSelectedFileStatus);
+  elements.clipboardForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    saveClipboard();
+  });
+  if (elements.clipboardRefreshButton) {
+    elements.clipboardRefreshButton.addEventListener("click", function () {
+      loadClipboard();
+    });
+  }
+  if (elements.clipboardClearButton) {
+    elements.clipboardClearButton.addEventListener("click", function () {
+      clearClipboard();
+    });
+  }
+  if (elements.clipboardCopyButton) {
+    elements.clipboardCopyButton.addEventListener("click", function () {
+      copyClipboardToLocal();
+    });
+  }
   document.addEventListener("click", function (event) {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
@@ -465,4 +593,5 @@
   }
 
   loadDirectory(initialPath, { force: !state.cache.has(initialPath) });
+  loadClipboard();
 })();

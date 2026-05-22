@@ -31,6 +31,7 @@
 #define READ_BUFFER_SIZE 8192
 #define MAX_HEADER_SIZE (64 * 1024)
 #define MAX_BODY_SIZE (100 * 1024 * 1024)
+#define MAX_CLIPBOARD_SIZE (1024 * 1024)
 #define LOG_FILE_PREFIX "file_hub"
 
 static char g_log_dir[PATH_MAX] = ".";
@@ -64,7 +65,20 @@ typedef struct {
     char client_ip[INET_ADDRSTRLEN];
 } ClientContext;
 
+typedef struct {
+    pthread_mutex_t mutex;
+    char *text;
+    size_t length;
+    time_t updated_at;
+} ClipboardStore;
+
 static volatile sig_atomic_t keep_running = 1;
+static ClipboardStore g_clipboard = {
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .text = NULL,
+    .length = 0,
+    .updated_at = 0,
+};
 
 static bool find_query_param(const char *query, const char *key, char *value, size_t value_size);
 static bool list_directory(const char *dir_path, FileEntry **entries_out, size_t *count_out);
@@ -272,6 +286,59 @@ static bool send_text_response(int client_fd, int status_code, const char *statu
                          message,
                          strlen(message),
                          NULL);
+}
+
+static bool duplicate_bytes(const char *source, size_t length, char **copy_out) {
+    char *copy = malloc(length + 1);
+    if (copy == NULL) {
+        return false;
+    }
+
+    if (length > 0 && source != NULL) {
+        memcpy(copy, source, length);
+    }
+    copy[length] = '\0';
+    *copy_out = copy;
+    return true;
+}
+
+static bool clipboard_get_copy(char **text_out, size_t *length_out, time_t *updated_at_out) {
+    if (text_out == NULL || length_out == NULL || updated_at_out == NULL) {
+        return false;
+    }
+
+    if (pthread_mutex_lock(&g_clipboard.mutex) != 0) {
+        return false;
+    }
+
+    bool ok = duplicate_bytes(g_clipboard.text, g_clipboard.length, text_out);
+    if (ok) {
+        *length_out = g_clipboard.length;
+        *updated_at_out = g_clipboard.updated_at;
+    }
+
+    pthread_mutex_unlock(&g_clipboard.mutex);
+    return ok;
+}
+
+static bool clipboard_set_text(const char *text, size_t length) {
+    char *copy = NULL;
+    if (!duplicate_bytes(text, length, &copy)) {
+        return false;
+    }
+
+    if (pthread_mutex_lock(&g_clipboard.mutex) != 0) {
+        free(copy);
+        return false;
+    }
+
+    free(g_clipboard.text);
+    g_clipboard.text = copy;
+    g_clipboard.length = length;
+    g_clipboard.updated_at = time(NULL);
+
+    pthread_mutex_unlock(&g_clipboard.mutex);
+    return true;
 }
 
 static char from_hex(char c) {
@@ -680,6 +747,67 @@ static bool send_json_message(int client_fd, int status_code, const char *status
                               NULL);
     sb_free(&body);
     return sent;
+}
+
+static bool send_clipboard_json(int client_fd) {
+    char *text = NULL;
+    size_t length = 0;
+    time_t updated_at = 0;
+    if (!clipboard_get_copy(&text, &length, &updated_at)) {
+        free(text);
+        return send_json_message(client_fd, 500, "Internal Server Error", false, "剪贴板读取失败。");
+    }
+
+    char updated_at_text[64];
+    if (updated_at != 0) {
+        if (!format_time_string(updated_at, updated_at_text, sizeof(updated_at_text))) {
+            updated_at_text[0] = '\0';
+        }
+    } else {
+        updated_at_text[0] = '\0';
+    }
+
+    StringBuilder body;
+    sb_init(&body);
+    bool ok = sb_append(&body, "{\"ok\":true,\"text\":\"");
+    if (ok) {
+        ok = json_escape_append(&body, text != NULL ? text : "");
+    }
+    if (ok) {
+        ok = sb_append_format(&body, "\",\"length\":%zu,\"updated_at\":\"", length);
+    }
+    if (ok) {
+        ok = json_escape_append(&body, updated_at_text);
+    }
+    if (ok) {
+        ok = sb_append(&body, "\"}");
+    }
+
+    free(text);
+    if (!ok) {
+        sb_free(&body);
+        return send_json_message(client_fd, 500, "Internal Server Error", false, "剪贴板响应生成失败。");
+    }
+
+    bool sent = send_response(client_fd,
+                              200,
+                              "OK",
+                              "application/json; charset=utf-8",
+                              body.data,
+                              body.length,
+                              NULL);
+    sb_free(&body);
+    return sent;
+}
+
+static bool update_clipboard_from_body(int client_fd, const char *body, size_t body_length) {
+    if (body_length > MAX_CLIPBOARD_SIZE) {
+        return send_json_message(client_fd, 413, "Payload Too Large", false, "剪贴板内容过大。");
+    }
+    if (!clipboard_set_text(body != NULL ? body : "", body_length)) {
+        return send_json_message(client_fd, 500, "Internal Server Error", false, "剪贴板保存失败。");
+    }
+    return send_clipboard_json(client_fd);
 }
 
 static bool resolve_listing_target(const char *base_dir,
@@ -1796,6 +1924,26 @@ static void handle_client(int client_fd, const char *base_dir, const char *front
 
     if (strcmp(request.method, "GET") == 0 && strcmp(request.path, "/api/list") == 0) {
         send_directory_listing_json(client_fd, base_dir, request.query);
+    } else if (strcmp(request.path, "/api/clipboard") == 0 && strcmp(request.method, "GET") == 0) {
+        send_clipboard_json(client_fd);
+    } else if (strcmp(request.path, "/api/clipboard") == 0 &&
+               (strcmp(request.method, "POST") == 0 || strcmp(request.method, "PUT") == 0)) {
+        if (!read_http_request_body(client_fd,
+                                    request.content_length,
+                                    buffered_body,
+                                    buffered_body_length,
+                                    &body,
+                                    &body_length)) {
+            send_json_message(client_fd, 413, "Payload Too Large", false, "剪贴板内容过大。");
+        } else {
+            update_clipboard_from_body(client_fd, body, body_length);
+        }
+    } else if (strcmp(request.path, "/api/clipboard") == 0 && strcmp(request.method, "DELETE") == 0) {
+        if (!clipboard_set_text("", 0)) {
+            send_json_message(client_fd, 500, "Internal Server Error", false, "剪贴板清空失败。");
+        } else {
+            send_clipboard_json(client_fd);
+        }
     } else if (strcmp(request.method, "GET") == 0 && strcmp(request.path, "/api/download") == 0) {
         send_file_download(client_fd, base_dir, request.query, client_ip);
     } else if (strcmp(request.method, "POST") == 0 && strcmp(request.path, "/api/upload/chunk") == 0) {

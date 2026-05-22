@@ -51,6 +51,9 @@ docker build -t file-transfer-hub .
 ## API
 
 - `GET /api/list?path=<相对目录>`: 获取目录内容
+- `GET /api/clipboard`: 获取当前剪贴板文本
+- `POST /api/clipboard`: 保存剪贴板文本，请求体为纯文本
+- `DELETE /api/clipboard`: 清空剪贴板文本
 - `POST /api/upload?path=<相对目录>`: 上传文件
 - `POST /api/upload/chunk?path=<相对目录>&file=<文件名>&upload_id=<会话ID>&chunk_index=<分片序号>&total_chunks=<分片总数>`: 分片上传
 - `GET /api/download?path=<相对目录>&file=<文件名>`: 下载文件

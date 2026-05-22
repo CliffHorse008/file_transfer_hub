@@ -63,6 +63,12 @@ body.loading .wrap {
   margin-top: 20px;
 }
 
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
 .panel {
   padding: 22px;
 }
@@ -78,6 +84,14 @@ body.loading .wrap {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 button,
@@ -115,6 +129,28 @@ form {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.clipboard-form {
+  gap: 12px;
+}
+
+.clipboard-input {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  padding: 14px 16px;
+  border: 1px solid #d9b792;
+  border-radius: 16px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.6;
+}
+
+.clipboard-input:focus {
+  outline: 2px solid rgba(138, 75, 42, 0.18);
+  border-color: var(--accent);
 }
 
 .file-input {
