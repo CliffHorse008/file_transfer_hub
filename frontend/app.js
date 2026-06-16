@@ -78,6 +78,15 @@
     return "/api/clipboard";
   }
 
+  function buildFileUrl(path, fileName) {
+    const params = new URLSearchParams();
+    if (path) {
+      params.set("path", path);
+    }
+    params.set("file", fileName);
+    return `/api/file?${params.toString()}`;
+  }
+
   function getPathFromLocation() {
     return new URLSearchParams(window.location.search).get("path") || "";
   }
@@ -327,16 +336,52 @@
       }
 
       const downloadUrl = escapeHtml(item.download_url || "#");
+      const fileName = escapeHtml(item.name || "");
       return `
         <tr>
           <td>${name}</td>
           <td><span class="badge">${badge}</span></td>
           <td>${sizeText}</td>
           <td>${modifiedAt}</td>
-          <td><a class="link-button table-action" href="${downloadUrl}">下载</a></td>
+          <td>
+            <div class="table-actions">
+              <a class="link-button table-action" href="${downloadUrl}">下载</a>
+              <button class="ghost-button danger-button table-action delete-file-button" type="button" data-file="${fileName}">删除</button>
+            </div>
+          </td>
         </tr>
       `;
     }).join("");
+  }
+
+  async function deleteFile(fileName) {
+    if (!fileName) {
+      return;
+    }
+    if (!window.confirm(`确定删除「${fileName}」吗？`)) {
+      return;
+    }
+
+    setPageLoading(true);
+    try {
+      const response = await fetch(buildFileUrl(state.currentPath, fileName), {
+        method: "DELETE",
+        headers: {
+          "X-Requested-With": "fetch"
+        }
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error((data && data.message) || "删除失败");
+      }
+
+      state.cache.delete(state.currentPath);
+      await loadDirectory(state.currentPath, { force: true });
+    } catch (error) {
+      showError(error.message || "删除失败");
+    } finally {
+      setPageLoading(false);
+    }
   }
 
   async function loadDirectory(path, options) {
@@ -568,6 +613,12 @@
     const sortButton = target.closest(".sort-button");
     if (sortButton instanceof HTMLButtonElement) {
       setSort(sortButton.dataset.sortKey || "");
+      return;
+    }
+
+    const deleteButton = target.closest(".delete-file-button");
+    if (deleteButton instanceof HTMLButtonElement) {
+      deleteFile(deleteButton.dataset.file || "");
       return;
     }
 

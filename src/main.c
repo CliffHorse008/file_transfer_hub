@@ -1897,6 +1897,79 @@ static bool send_file_download(int client_fd, const char *base_dir, const char *
     return true;
 }
 
+static bool delete_file_entry(int client_fd, const char *base_dir, const char *query, const char *client_ip) {
+    char relative_path[PATH_MAX];
+    char decoded_path[PATH_MAX];
+    if (find_query_param(query, "path", decoded_path, sizeof(decoded_path))) {
+        if (!normalize_relative_path(decoded_path, relative_path, sizeof(relative_path))) {
+            log_event(client_ip, "delete_failed", "invalid path parameter");
+            return send_json_message(client_fd, 400, "Bad Request", false, "目录参数无效。");
+        }
+    } else {
+        relative_path[0] = '\0';
+    }
+
+    char target_dir[PATH_MAX];
+    if (!resolve_directory_path(base_dir, relative_path, target_dir, sizeof(target_dir))) {
+        log_event(client_ip, "delete_failed", "directory not found");
+        return send_json_message(client_fd, 404, "Not Found", false, "目录不存在。");
+    }
+
+    char filename[NAME_MAX];
+    if (!find_query_param(query, "file", filename, sizeof(filename)) || !is_safe_filename(filename)) {
+        log_event(client_ip, "delete_failed", "invalid file parameter");
+        return send_json_message(client_fd, 400, "Bad Request", false, "文件名无效。");
+    }
+
+    char full_path[PATH_MAX];
+    if (!join_path(full_path, sizeof(full_path), target_dir, filename)) {
+        log_event(client_ip, "delete_failed", "path too long");
+        return send_json_message(client_fd, 400, "Bad Request", false, "路径过长。");
+    }
+
+    struct stat st;
+    if (lstat(full_path, &st) != 0) {
+        char detail[512];
+        snprintf(detail, sizeof(detail), "file=%.200s path=%.200s reason=not_found", filename, relative_path);
+        log_event(client_ip, "delete_failed", detail);
+        return send_json_message(client_fd, 404, "Not Found", false, "文件不存在。");
+    }
+    if (!S_ISREG(st.st_mode)) {
+        char detail[512];
+        snprintf(detail, sizeof(detail), "file=%.200s path=%.200s reason=not_regular_file", filename, relative_path);
+        log_event(client_ip, "delete_failed", detail);
+        return send_json_message(client_fd, 400, "Bad Request", false, "只能删除文件。");
+    }
+
+    int dir_fd = open(target_dir, O_RDONLY | O_DIRECTORY);
+    if (dir_fd < 0) {
+        char detail[512];
+        snprintf(detail, sizeof(detail), "file=%.200s path=%.200s reason=open_dir_failed", filename, relative_path);
+        log_event(client_ip, "delete_failed", detail);
+        return send_json_message(client_fd, 500, "Internal Server Error", false, "目录打开失败。");
+    }
+
+    if (unlinkat(dir_fd, filename, 0) != 0) {
+        int unlink_errno = errno;
+        close(dir_fd);
+        char detail[512];
+        snprintf(detail,
+                 sizeof(detail),
+                 "file=%.160s path=%.160s reason=%.120s",
+                 filename,
+                 relative_path,
+                 strerror(unlink_errno));
+        log_event(client_ip, "delete_failed", detail);
+        return send_json_message(client_fd, 500, "Internal Server Error", false, "文件删除失败。");
+    }
+    close(dir_fd);
+
+    char detail[512];
+    snprintf(detail, sizeof(detail), "file=%.200s path=%.200s size=%lld", filename, relative_path, (long long)st.st_size);
+    log_event(client_ip, "delete_success", detail);
+    return send_json_message(client_fd, 200, "OK", true, "删除成功。");
+}
+
 static void handle_client(int client_fd, const char *base_dir, const char *frontend_dir, const char *client_ip) {
     HttpRequest request;
     char *buffered_body = NULL;
@@ -1946,6 +2019,8 @@ static void handle_client(int client_fd, const char *base_dir, const char *front
         }
     } else if (strcmp(request.method, "GET") == 0 && strcmp(request.path, "/api/download") == 0) {
         send_file_download(client_fd, base_dir, request.query, client_ip);
+    } else if (strcmp(request.method, "DELETE") == 0 && strcmp(request.path, "/api/file") == 0) {
+        delete_file_entry(client_fd, base_dir, request.query, client_ip);
     } else if (strcmp(request.method, "POST") == 0 && strcmp(request.path, "/api/upload/chunk") == 0) {
         char relative_path[PATH_MAX];
         char decoded_path[PATH_MAX];
